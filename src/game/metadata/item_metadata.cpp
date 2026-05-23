@@ -56,16 +56,16 @@ std::uint32_t ReadAnyGoodsIconId(std::uintptr_t repo, std::uint32_t item_id)
         }
     }
 
-    for (std::uintptr_t candidate = 0; candidate < 0x1000; candidate += sizeof(void*)) {
-        if (candidate == kMagicParamOffset || candidate == offset) continue;
-        const std::uint8_t* row = param_repository::FindRowData(repo, candidate, item_id);
-        if (!row) continue;
+    // for (std::uintptr_t candidate = 0; candidate < 0x1000; candidate += sizeof(void*)) {
+    //     if (candidate == kMagicParamOffset || candidate == offset) continue;
+    //     const std::uint8_t* row = param_repository::FindRowData(repo, candidate, item_id);
+    //     if (!row) continue;
 
-        const auto icon_id = *reinterpret_cast<const std::uint16_t*>(row + kGoodsIconIdOffset);
-        if (icon_id == 0) continue;
+    //     const auto icon_id = *reinterpret_cast<const std::uint16_t*>(row + kGoodsIconIdOffset);
+    //     if (icon_id == 0) continue;
 
-        return static_cast<std::uint32_t>(icon_id);
-    }
+    //     return static_cast<std::uint32_t>(icon_id);
+    // }
 
     return 0;
 }
