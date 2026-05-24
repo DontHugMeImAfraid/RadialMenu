@@ -18,6 +18,7 @@
 #include <backends/imgui_impl_dx12.h>
 #include <backends/imgui_impl_win32.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -58,6 +59,8 @@ static bool                        g_invalidate_slots_after_gameplay_return = fa
 static bool                        g_logged_icon_vfs_unavailable = false;
 static ULONGLONG                   g_next_icon_init_attempt_ms = 0;
 static bool                        g_refreshed_open_icon_atlases = false;
+static HANDLE                      g_icon_init_thread = nullptr;
+static std::atomic_bool            g_icon_init_succeeded{false};
 static ULONGLONG                   g_last_slow_asset_install_log_ms = 0;
 static ULONGLONG                   g_last_slow_gameplay_state_log_ms = 0;
 static ULONGLONG                   g_last_slow_native_input_log_ms = 0;
@@ -116,6 +119,14 @@ static void LogSlowDuration(const char* label, ULONGLONG start_ms, ULONGLONG thr
     Log("Timing: %s took %llums.", label, static_cast<unsigned long long>(elapsed));
 }
 
+static DWORD WINAPI IconInitializationThreadProc(void*)
+{
+    g_icon_init_succeeded.store(
+        icon_loader::TryInitialize(g_device, g_queue, g_icon_srv_cpu, g_icon_srv_gpu, icon_loader::kMaxAtlases),
+        std::memory_order_release);
+    return 0;
+}
+
 // ── SRV bump allocator ────────────────────────────────────────────────────
 static UINT g_srv_used = 0;
 static void SrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
@@ -134,6 +145,25 @@ static bool TryInitializeIcons()
     if (g_icons_ready) return true;
 
     const ULONGLONG now = GetTickCount64();
+
+    if (g_icon_init_thread) {
+        const DWORD wait = WaitForSingleObject(g_icon_init_thread, 0);
+        if (wait == WAIT_TIMEOUT) return false;
+
+        CloseHandle(g_icon_init_thread);
+        g_icon_init_thread = nullptr;
+
+        if (wait == WAIT_OBJECT_0 && g_icon_init_succeeded.load(std::memory_order_acquire)) {
+            radial_menu::SetIconTextureResolver(&icon_loader::Resolve);
+            g_icons_ready = true;
+            Log("Icon loader initialized.");
+            return true;
+        }
+
+        g_next_icon_init_attempt_ms = now + 1000;
+        return false;
+    }
+
     if (g_next_icon_init_attempt_ms != 0 && now < g_next_icon_init_attempt_ms) return false;
 
     if (!g_icon_srv_allocated) {
@@ -143,14 +173,25 @@ static bool TryInitializeIcons()
         g_icon_srv_allocated = true;
     }
 
-    if (icon_loader::TryInitialize(g_device, g_queue, g_icon_srv_cpu, g_icon_srv_gpu, icon_loader::kMaxAtlases)) {
-        radial_menu::SetIconTextureResolver(&icon_loader::Resolve);
-        g_icons_ready = true;
-        Log("Icon loader initialized.");
-        return true;
+    g_icon_init_succeeded.store(false, std::memory_order_release);
+    g_icon_init_thread = CreateThread(nullptr, 0, IconInitializationThreadProc, nullptr, 0, nullptr);
+    if (g_icon_init_thread) {
+        SetThreadPriority(g_icon_init_thread, THREAD_PRIORITY_BELOW_NORMAL);
+        Log("Icon loader initialization started on background thread.");
+        return false;
     }
+
+    Log("Icon loader: failed to create background initialization thread.");
     g_next_icon_init_attempt_ms = now + 1000;
     return false;
+}
+
+static void WaitForIconInitializationThread()
+{
+    if (!g_icon_init_thread) return;
+    WaitForSingleObject(g_icon_init_thread, INFINITE);
+    CloseHandle(g_icon_init_thread);
+    g_icon_init_thread = nullptr;
 }
 
 static bool RefreshRequiredIconAtlasesForSlots(const std::vector<RadialSlot>& slots)
@@ -198,9 +239,11 @@ static void ReleaseOverlayResources(const char* reason)
     if (!g_ready && !g_device && !g_frames && !g_rtv_heap && !g_srv_heap && !g_cmdlist) return;
 
     WaitForQueueIdle();
+    WaitForIconInitializationThread();
     icon_loader::Shutdown();
     radial_menu::InvalidateDrawCache();
     g_icons_ready = false;
+    g_icon_init_succeeded.store(false, std::memory_order_release);
     g_icon_srv_allocated = false;
     g_srv_used = 0;
     for (std::size_t i = 0; i < icon_loader::kMaxAtlases; ++i) {
@@ -332,6 +375,7 @@ static void Init(IDXGISwapChain3* swap_chain)
     g_old_wndproc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)HookedWndProc);
     g_ready = true;
     Log("D3D12 overlay initialized (buffers=%u hwnd=%p).", g_buf_count, (void*)g_hwnd);
+
 }
 
 static void RenderRadialOverlay(IDXGISwapChain3* swap_chain)
@@ -340,8 +384,10 @@ static void RenderRadialOverlay(IDXGISwapChain3* swap_chain)
     if (buffer_index >= g_buf_count || !g_frames || !g_frames[buffer_index].allocator ||
         !g_frames[buffer_index].backbuffer || !g_cmdlist || !g_srv_heap || !g_queue) {
         return;
+
     }
     Frame& frame = g_frames[buffer_index];
+    icon_loader::UpdatePendingUploads();
 
     if (FAILED(frame.allocator->Reset())) return;
     if (FAILED(g_cmdlist->Reset(frame.allocator, nullptr))) return;
@@ -390,6 +436,8 @@ static void CaptureDirectQueue(ID3D12CommandQueue* queue)
 // ── Present hook ──────────────────────────────────────────────────────────
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain3* swap_chain, UINT sync, UINT flags)
 {
+    const ULONGLONG frame_start = TimingStart();
+
     if (!g_ready) {
         if (g_queue) Init(swap_chain);
         return g_orig_present(swap_chain, sync, flags);
@@ -407,10 +455,12 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain3* swap_chain, UINT
 
     section_start = TimingStart();
     const bool gameplay_ready = gameplay_state::RefreshNormalGameplayHudState();
+    LogSlowDuration("gameplay_state::RefreshNormalGameplayHudState", section_start, 4,
+        g_last_slow_gameplay_state_log_ms);
+
     const bool entered_gameplay = !g_gameplay_ready_last_frame && gameplay_ready;
     const bool left_gameplay = g_gameplay_ready_last_frame && !gameplay_ready;
     g_gameplay_ready_frame_count = gameplay_ready ? std::min<UINT>(g_gameplay_ready_frame_count + 1, 60) : 0;
-    LogSlowDuration("gameplay_state::RefreshNormalGameplayHudState", section_start, 4, g_last_slow_gameplay_state_log_ms);
 
     if (!kDisableNativeInputForDiagnosticBuild && (gameplay_ready || left_gameplay)) {
         section_start = TimingStart();
@@ -425,16 +475,20 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain3* swap_chain, UINT
 
     if (gameplay_ready) {
         if (entered_gameplay && g_invalidate_slots_after_gameplay_return) {
+            section_start = TimingStart();
             InvalidateRadialSlotCaches();
+            LogSlowDuration("InvalidateRadialSlotCaches", section_start, 4, g_last_slow_icon_refresh_log_ms);
             g_invalidate_slots_after_gameplay_return = false;
         }
         if (!g_icons_ready) {
             section_start = TimingStart();
             TryInitializeIcons();
-            LogSlowDuration("TryInitializeIcons", section_start, 16, g_last_slow_icon_init_log_ms);
+            LogSlowDuration("TryInitializeIcons", section_start, 4, g_last_slow_icon_init_log_ms);
         }
         if (g_icons_ready && radial_open && !g_refreshed_open_icon_atlases) {
+            section_start = TimingStart();
             g_refreshed_open_icon_atlases = RefreshRequiredIconAtlasesForSlots(radial_input::GetOpenRadialSlots());
+            LogSlowDuration("RefreshRequiredIconAtlasesForSlots", section_start, 4, g_last_slow_icon_refresh_log_ms);
         }
         if (g_icons_ready && !radial_open && g_gameplay_ready_frame_count > 1) {
             g_refreshed_open_icon_atlases = false;
@@ -443,13 +497,17 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain3* swap_chain, UINT
 
     if (!radial_open) {
         g_gameplay_ready_last_frame = gameplay_ready;
+        LogSlowDuration("HookedPresent(no radial)", frame_start, 16, g_last_slow_render_log_ms);
         return g_orig_present(swap_chain, sync, flags);
     }
 
     section_start = TimingStart();
     RenderRadialOverlay(swap_chain);
     LogSlowDuration("RenderRadialOverlay", section_start, 4, g_last_slow_render_log_ms);
+
     g_gameplay_ready_last_frame = gameplay_ready;
+    LogSlowDuration("HookedPresent(radial open)", frame_start, 16, g_last_slow_render_log_ms);
+
     return g_orig_present(swap_chain, sync, flags);
 }
 

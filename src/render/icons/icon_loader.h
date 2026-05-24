@@ -20,6 +20,7 @@ bool TryInitialize(
 void SetRequiredIcons(const std::vector<std::uint32_t>& icon_ids);
 bool PreloadIcons(const std::vector<std::uint32_t>& icon_ids, std::size_t max_uploads);
 radial_menu::IconTextureInfo Resolve(std::uint32_t icon_id);
+void UpdatePendingUploads();
 void Shutdown();
 
 }  // namespace radial_menu_mod::icon_loader

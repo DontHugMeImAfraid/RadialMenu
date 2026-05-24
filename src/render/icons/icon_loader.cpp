@@ -17,6 +17,13 @@
 namespace radial_menu_mod::icon_loader {
 namespace {
 
+struct AtlasPendingUpload {
+    std::size_t atlas_index = 0;
+    d3d_texture_upload::PendingUpload pending;
+};
+
+std::vector<AtlasPendingUpload> g_pending_uploads;
+
 struct IconEntry {
     std::size_t atlas_index = 0;
     icon_assets::Rect rect{};
@@ -176,32 +183,65 @@ bool UploadAtlas(std::size_t atlas_index)
         return false;
     }
 
-    d3d_texture_upload::UploadedTexture texture{};
-    if (!d3d_texture_upload::UploadBc7Texture(g_device, g_queue, g_cpu_srvs[atlas_index], dds, texture)) {
+    // Start async upload
+    AtlasPendingUpload pending_upload;
+    pending_upload.atlas_index = atlas_index;
+
+    if (!d3d_texture_upload::StartBc7TextureUpload(g_device, g_queue, g_cpu_srvs[atlas_index], dds, pending_upload.pending)) {
         ++source->upload_failure_count;
         if (source->upload_failure_count <= 4) {
-            Log("Icon loader: %s failed to upload atlas '%s' (%zu DDS bytes).",
-                source->label,
-                atlas.name.c_str(),
-                dds.size());
+            Log("Icon loader: %s failed to start upload for atlas '%s' (%zu DDS bytes).",
+                source->label, atlas.name.c_str(), dds.size());
         }
         atlas.upload_failed = true;
         return false;
     }
 
-    atlas.texture = texture.resource;
-    atlas.width = texture.width;
-    atlas.height = texture.height;
-    atlas.gpu_srv = g_gpu_srvs[atlas_index];
-    source->uploaded_any = true;
-    ++source->uploaded_count;
-    Log("Icon loader uploaded atlas[%zu]: source=%s name='%s' size=%.0fx%.0f.",
-        atlas_index,
-        source->label,
-        atlas.name.c_str(),
-        atlas.width,
-        atlas.height);
-    return true;
+    g_pending_uploads.push_back(std::move(pending_upload));
+    Log("Icon loader started async upload for atlas[%zu]: source=%s name='%s'.",
+        atlas_index, source->label, atlas.name.c_str());
+    return false;
+}
+
+void UpdatePendingUploadsInternal()
+{
+    if (g_pending_uploads.empty()) return;
+
+    const ULONGLONG start = GetTickCount64();
+    std::size_t completed_count = 0;
+
+    for (auto it = g_pending_uploads.begin(); it != g_pending_uploads.end();) {
+        d3d_texture_upload::UploadedTexture texture;
+        if (d3d_texture_upload::CompletePendingUpload(it->pending, texture)) {
+            const std::size_t atlas_index = it->atlas_index;
+            Atlas& atlas = g_atlases[atlas_index];
+            IconSource* source = SourceForAtlas(atlas);
+
+            atlas.texture = texture.resource;
+            atlas.width = texture.width;
+            atlas.height = texture.height;
+            atlas.gpu_srv = g_gpu_srvs[atlas_index];
+
+            if (source) {
+                source->uploaded_any = true;
+                ++source->uploaded_count;
+            }
+
+            Log("Icon loader completed async upload for atlas[%zu]: size=%.0fx%.0f.",
+                atlas_index, atlas.width, atlas.height);
+
+            it = g_pending_uploads.erase(it);
+            ++completed_count;
+        } else {
+            ++it;
+        }
+    }
+
+    const ULONGLONG elapsed = GetTickCount64() - start;
+    if (elapsed >= 4 || completed_count > 0) {
+        Log("PERF: UpdatePendingUploadsInternal took %llums, completed %zu/%zu uploads",
+            elapsed, completed_count, completed_count + g_pending_uploads.size());
+    }
 }
 
 void LogSourceReadResult(const IconSource& source, bool read_tpf, bool read_layout)
@@ -383,9 +423,11 @@ void SetRequiredIcons(const std::vector<std::uint32_t>& icon_ids)
 
 bool PreloadIcons(const std::vector<std::uint32_t>& icon_ids, std::size_t max_uploads)
 {
+    UpdatePendingUploadsInternal();
+
     if (!g_initialized || !g_device || !g_queue) return false;
 
-    std::size_t uploaded_count = 0;
+    std::size_t started_uploads = 0;
     bool pending_upload = false;
 
     const auto try_upload = [&](const IconEntry* entry) -> bool {
@@ -395,13 +437,23 @@ bool PreloadIcons(const std::vector<std::uint32_t>& icon_ids, std::size_t max_up
         if (atlas.texture && atlas.gpu_srv.ptr) return true;
         if (atlas.upload_failed) return false;
 
-        if (uploaded_count >= max_uploads) {
+        // Check if already in pending uploads
+        for (const auto& pending : g_pending_uploads) {
+            if (pending.atlas_index == entry->atlas_index) {
+                pending_upload = true;
+                return false;
+            }
+        }
+
+        if (started_uploads >= max_uploads) {
             pending_upload = true;
             return false;
         }
 
         const bool uploaded = UploadAtlas(entry->atlas_index);
-        if (uploaded) ++uploaded_count;
+        if (!uploaded) {
+            ++started_uploads;
+        }
         return uploaded;
     };
 
@@ -411,9 +463,8 @@ bool PreloadIcons(const std::vector<std::uint32_t>& icon_ids, std::size_t max_up
         (void)try_upload(FindLayoutIcon(g_low_source, icon_id));
     }
 
-    return !pending_upload;
+    return !pending_upload && g_pending_uploads.empty();
 }
-
 radial_menu::IconTextureInfo Resolve(std::uint32_t icon_id)
 {
     if (!g_initialized) return {};
@@ -442,6 +493,11 @@ radial_menu::IconTextureInfo Resolve(std::uint32_t icon_id)
 
 void Shutdown()
 {
+    for (auto& pending : g_pending_uploads) {
+        d3d_texture_upload::ReleasePendingUpload(pending.pending);
+    }
+    g_pending_uploads.clear();
+
     ResetLoadedIconState();
     g_device = nullptr;
     g_queue = nullptr;
@@ -459,4 +515,8 @@ void Shutdown()
     g_failed = false;
 }
 
+void UpdatePendingUploads()
+{
+    UpdatePendingUploadsInternal();
+}
 }  // namespace radial_menu_mod::icon_loader

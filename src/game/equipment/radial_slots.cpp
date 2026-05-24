@@ -178,15 +178,28 @@ std::vector<RadialSlot> GetMemorizedSpells()
     }
     g_logged_no_equip_data = false;
 
+    // CHECK CACHE FIRST - before any expensive reads
     std::int32_t current_entry = -1;
-    ReadSelectedSpellSlot(equip_magic_data, current_entry);
     if (g_cached_spells_valid && equip_magic_data == g_cached_spells_signature.equip_magic_data) {
-        spells = g_cached_spells;
-        if (current_entry >= 0) UpdateCurrentFlags(spells, static_cast<std::size_t>(current_entry));
-        LogSlowSlotDuration("GetMemorizedSpells", start, g_last_slow_spell_slots_log_ms);
-        return spells;
+        // Quick validation: just check if signature still matches
+        SpellCacheSignature check_sig{};
+        if (ReadSpellSignature(equip_magic_data, check_sig) && 
+            check_sig.ids == g_cached_spells_signature.ids) {
+            // Cache is still valid
+            spells = g_cached_spells;
+            if (ReadSelectedSpellSlot(equip_magic_data, current_entry) && current_entry >= 0) {
+                UpdateCurrentFlags(spells, static_cast<std::size_t>(current_entry));
+            }
+            LogSlowSlotDuration("GetMemorizedSpells", start, g_last_slow_spell_slots_log_ms);
+            return spells;
+        }
+        // Signature changed, invalidate cache
+        g_cached_spells_valid = false;
     }
 
+    // Cache invalid or missing - do full read
+    ReadSelectedSpellSlot(equip_magic_data, current_entry);
+    
     SpellCacheSignature signature{};
     if (!ReadSpellSignature(equip_magic_data, signature)) {
         LogSlowSlotDuration("GetMemorizedSpells", start, g_last_slow_spell_slots_log_ms);
@@ -276,15 +289,30 @@ std::vector<RadialSlot> GetQuickItems()
         return items;
     }
 
+    // CHECK CACHE FIRST - before any expensive reads
     std::int32_t current_slot = -1;
-    ReadSelectedQuickItemSlot(equip_item_data, current_slot);
     if (g_cached_quick_items_valid && equip_item_data == g_cached_quick_items_signature.equip_item_data) {
-        items = g_cached_quick_items;
-        if (current_slot >= 0) UpdateCurrentFlags(items, static_cast<std::size_t>(current_slot));
-        LogSlowSlotDuration("GetQuickItems", start, g_last_slow_item_slots_log_ms);
-        return items;
+        QuickItemInventorySnapshot check_snapshot{};
+        if (ReadQuickItemInventorySnapshot(equip_item_data, check_snapshot)) {
+            QuickItemCacheSignature check_sig{};
+            if (ReadQuickItemSignature(equip_item_data, check_snapshot, check_sig) &&
+                check_sig.ids == g_cached_quick_items_signature.ids) {
+                // Cache is still valid
+                items = g_cached_quick_items;
+                if (ReadSelectedQuickItemSlot(equip_item_data, current_slot) && current_slot >= 0) {
+                    UpdateCurrentFlags(items, static_cast<std::size_t>(current_slot));
+                }
+                LogSlowSlotDuration("GetQuickItems", start, g_last_slow_item_slots_log_ms);
+                return items;
+            }
+        }
+        // Signature changed, invalidate cache
+        g_cached_quick_items_valid = false;
     }
 
+    // Cache invalid or missing - do full read
+    ReadSelectedQuickItemSlot(equip_item_data, current_slot);
+    
     QuickItemInventorySnapshot quick_items{};
     if (!ReadQuickItemInventorySnapshot(equip_item_data, quick_items)) {
         LogSlowSlotDuration("GetQuickItems", start, g_last_slow_item_slots_log_ms);

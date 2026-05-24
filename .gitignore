@@ -24,3 +24,5 @@ compile_commands.json
 *.user
 Thumbs.db
 Desktop.ini
+RadialMenuProfile.me3
+natives/Release/RadialMenu.dll

@@ -6,6 +6,7 @@ start_online = false
 game = "eldenring"
 
 [[natives]]
-path = 'RadialMenu.dll'
+path = 'natives\Release\RadialMenu.dll'
 optional = false
 load_early = false
+

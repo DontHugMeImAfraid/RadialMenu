@@ -70,7 +70,13 @@ void LoadOpenRadialSlots(RadialKind kind)
 {
     const ULONGLONG start = GetTickCount64();
     g_open_radial_slots = kind == RadialKind::items ? GetQuickItems() : GetMemorizedSpells();
-    LogSlowOpenDuration(kind == RadialKind::items ? "LoadOpenRadialSlots(items)" : "LoadOpenRadialSlots(spells)", start);
+    const ULONGLONG elapsed = GetTickCount64() - start;
+    if (elapsed >= 4) {
+        Log("PERF: LoadOpenRadialSlots(%s) took %llums, returned %zu slots",
+            kind == RadialKind::items ? "items" : "spells",
+            elapsed,
+            g_open_radial_slots.size());
+    }
 }
 
 int CurrentSelectionFor(RadialKind kind)
