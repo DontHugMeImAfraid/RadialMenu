@@ -305,10 +305,34 @@ void DrawSelectedDetails(ImDrawList* draw_list, ImFont* font, float base_font_si
     }
 }
 
+void DrawEldenRingCursor(ImDrawList* draw_list, const RadialLayout& layout, const ImVec2& virtual_cursor_offset)
+{
+    const ImVec2 cursor = {
+        std::clamp(layout.center.x + virtual_cursor_offset.x, layout.viewport->Pos.x, layout.bottom_right.x),
+        std::clamp(layout.center.y - virtual_cursor_offset.y, layout.viewport->Pos.y, layout.bottom_right.y),
+    };
+    const float scale = layout.ui_scale;
+    const ImVec2 tip = cursor;
+    const ImVec2 outer_a = {cursor.x + (11.0f * scale), cursor.y + (31.0f * scale)};
+    const ImVec2 outer_b = {cursor.x + (18.0f * scale), cursor.y + (20.0f * scale)};
+    const ImVec2 inner_a = {cursor.x + (7.0f * scale), cursor.y + (23.0f * scale)};
+    const ImVec2 inner_b = {cursor.x + (13.0f * scale), cursor.y + (18.0f * scale)};
+
+    draw_list->AddTriangleFilled(
+        {tip.x + (2.0f * scale), tip.y + (2.0f * scale)},
+        {outer_a.x + (2.0f * scale), outer_a.y + (2.0f * scale)},
+        {outer_b.x + (2.0f * scale), outer_b.y + (2.0f * scale)},
+        IM_COL32(0, 0, 0, 150));
+    draw_list->AddTriangleFilled(tip, outer_a, outer_b, IM_COL32(218, 190, 132, 238));
+    draw_list->AddTriangle(tip, outer_a, outer_b, IM_COL32(72, 54, 28, 235), 1.35f * scale);
+    draw_list->AddLine(inner_a, inner_b, IM_COL32(255, 237, 190, 215), 1.1f * scale);
+    draw_list->AddCircleFilled(tip, 2.0f * scale, IM_COL32(255, 245, 210, 245), 12);
+}
+
 }  // namespace
 
 void DrawMenuContents(const std::vector<RadialSlot>& slots, const char* title, const char* controls,
-    int selected_slot, const std::vector<IconTextureInfo>& icon_textures)
+    int selected_slot, const ImVec2& virtual_cursor_offset, const std::vector<IconTextureInfo>& icon_textures)
 {
     const RadialLayout layout = BuildLayout();
     BeginOverlayWindow(layout);
@@ -323,6 +347,7 @@ void DrawMenuContents(const std::vector<RadialSlot>& slots, const char* title, c
     DrawSelectedDetails(draw_list, font, base_font_size, layout, slots, title, selected_slot);
     AddCenteredText(draw_list, font, base_font_size * 0.84f * layout.ui_scale, layout.center,
         layout.center.y + layout.wheel_outer_radius + (28.0f * layout.ui_scale), IM_COL32(220, 213, 197, 220), controls);
+    DrawEldenRingCursor(draw_list, layout, virtual_cursor_offset);
 
     ImGui::End();
 }

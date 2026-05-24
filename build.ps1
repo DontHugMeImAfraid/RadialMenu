@@ -38,6 +38,18 @@ function Ensure-Vendor($Name, $Repo, $Ref, $Dir, $CheckFile) {
     }
 }
 
+function Write-DefaultConfig {
+    $ConfigPath = Join-Path $ProjectRoot 'natives/config.ini'
+    if (Test-Path $ConfigPath) {
+        return
+    }
+
+    @'
+[Input]
+CursorSensitivity=1.0
+'@ | Set-Content -Path $ConfigPath -Encoding ascii
+}
+
 Require-Command cmake
 
 New-Item -ItemType Directory -Force -Path $BuildDir, $VendorDir, (Join-Path $ProjectRoot 'natives') | Out-Null
@@ -54,7 +66,12 @@ if ($Ninja) {
 cmake -S $ProjectRoot -B $BuildDir @GeneratorArgs -DCMAKE_BUILD_TYPE=Release
 cmake --build $BuildDir --config Release
 
+Write-DefaultConfig
+
 Write-Host ''
 Write-Host 'Built DLL:'
 Write-Host "  $(Join-Path $ProjectRoot 'natives/RadialMenu.dll')"
+Write-Host ''
+Write-Host 'Default config:'
+Write-Host "  $(Join-Path $ProjectRoot 'natives/config.ini')"
 

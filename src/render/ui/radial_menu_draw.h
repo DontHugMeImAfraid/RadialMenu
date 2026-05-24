@@ -9,6 +9,7 @@ void DrawMenuContents(
     const char* title,
     const char* controls,
     int selected_slot,
+    const ImVec2& virtual_cursor_offset,
     const std::vector<IconTextureInfo>& icon_textures);
 void InvalidateMenuDrawCache();
 

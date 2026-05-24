@@ -1,6 +1,7 @@
 # Build output
 build/
 natives/*.dll
+natives/*.ini
 natives/*.pdb
 /*.dll
 
